@@ -347,10 +347,11 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     except Exception as e:
-        log.error(f"Error inesperado: {e}")
-        await update.message.reply_text(
-            "⚠️ Ocurrió un error inesperado. Intenta de nuevo en un momento."
-        )
+            log.error(f"Error inesperado: {e}")
+            await update.message.reply_text(
+                f"⚠️ Error: `{str(e)}`",
+                parse_mode="Markdown"
+            )
 
 
 # ─────────────────────────────────────────────
