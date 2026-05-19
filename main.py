@@ -110,7 +110,6 @@ Si el mensaje no contiene ninguna transacción financiera, devuelve:
 
 
 def parsear_con_ia(texto: str) -> dict:
-    """Envía el texto a Claude y retorna el JSON parseado."""
     respuesta = claude.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=400,
@@ -118,6 +117,8 @@ def parsear_con_ia(texto: str) -> dict:
         messages=[{"role": "user", "content": texto}],
     )
     raw = respuesta.content[0].text.strip()
+    # Limpiar backticks que algunos modelos agregan
+    raw = raw.replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
 
