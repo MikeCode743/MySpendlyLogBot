@@ -1,4 +1,4 @@
-# DonDineroBot 🤖💸
+# MySpendlyLogBot 🤖💸
 
 Bot de Telegram para registrar finanzas personales en lenguaje natural. Usa Claude AI para interpretar los mensajes y los guarda automáticamente en Google Sheets.
 
