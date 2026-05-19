@@ -5,7 +5,7 @@ usando lenguaje natural con Claude AI → Google Sheets
 """
 
 import os
-import json
+import json, tempfile
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
@@ -53,9 +53,15 @@ SCOPES = [
 
 
 def get_sheet():
-    """Retorna la hoja activa de Google Sheets."""
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-    gc    = gspread.authorize(creds)
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        # Viene de variable de entorno (Railway)
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    else:
+        # Viene de archivo local (desarrollo)
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+    gc = gspread.authorize(creds)
     return gc.open(GOOGLE_SHEET_NAME).sheet1
 
 
