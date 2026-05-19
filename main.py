@@ -1,5 +1,5 @@
 """
-DonDineroBot — Bot de finanzas personales para Telegram
+MySpendlyLogBot — Bot de finanzas personales para Telegram
 Registra gastos, ingresos, retiros, transferencias y préstamos
 usando lenguaje natural con Claude AI → Google Sheets
 """
@@ -219,7 +219,7 @@ def teclado_rapido():
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name or "amigo"
     await update.message.reply_text(
-        f"👋 ¡Hola *{nombre}*! Soy *DonDineroBot*.\n\n"
+        f"👋 ¡Hola *{nombre}*! Soy *MySpendlyLogBot*.\n\n"
         "Registra cualquier movimiento de dinero escribiendo en lenguaje natural:\n\n"
         "• `Gaste 10 en combustible`\n"
         "• `Retiré 40 dólares`\n"
@@ -375,7 +375,7 @@ def main():
     # Mensajes de texto (cualquier texto que no sea comando)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
 
-    log.info("🤖 DonDineroBot iniciado. Esperando mensajes...")
+    log.info("🤖 MySpendlyLogBot iniciado. Esperando mensajes...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
