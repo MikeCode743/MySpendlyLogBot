@@ -112,7 +112,7 @@ Si el mensaje no contiene ninguna transacción financiera, devuelve:
 def parsear_con_ia(texto: str) -> dict:
     """Envía el texto a Claude y retorna el JSON parseado."""
     respuesta = claude.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=400,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": texto}],
