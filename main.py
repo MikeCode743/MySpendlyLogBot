@@ -75,6 +75,8 @@ de transacciones financieras de mensajes en español (o inglés) y devolver
 EXCLUSIVAMENTE un objeto JSON válido — sin texto adicional, sin markdown,
 sin backticks.
 
+Hoy es: {hoy}
+
 Campos del JSON:
 - tipo        : "gasto" | "ingreso" | "retiro" | "transferencia" | "prestamo"
 - monto       : número decimal positivo (sin símbolo de moneda)
@@ -83,6 +85,10 @@ Campos del JSON:
 - categoria   : una de estas exactas:
                   "Vivienda" | "Alimentación" | "Transporte" | "Salud" |
                   "Entretenimiento" | "Ahorros/Inversiones" | "Otro"
+- fecha       : fecha en formato YYYY-MM-DD. Si el mensaje menciona cuándo ocurrió
+                (ayer, el lunes, hace 3 días, el 15 de mayo, etc.) resuélvela
+                respecto a la fecha de hoy indicada arriba. Si no se menciona fecha,
+                devuelve null.
 - persona     : nombre de la persona involucrada o null si no aplica
 - confianza   : "alta" | "media" | "baja" según qué tan clara fue la instrucción
 - nota        : aclaración breve si confianza es baja, o null
@@ -90,19 +96,22 @@ Campos del JSON:
 Ejemplos de entrada → salida:
 
 "gaste 10 en combustible"
-→ {"tipo":"gasto","monto":10,"moneda":"USD","descripcion":"Combustible","categoria":"Transporte","persona":null,"confianza":"alta","nota":null}
+→ {"tipo":"gasto","monto":10,"moneda":"USD","descripcion":"Combustible","categoria":"Transporte","fecha":null,"persona":null,"confianza":"alta","nota":null}
 
-"retiré 40 dólares"
-→ {"tipo":"retiro","monto":40,"moneda":"USD","descripcion":"Retiro de efectivo","categoria":"Otro","persona":null,"confianza":"alta","nota":null}
+"ayer gasté 15 en comida"
+→ {"tipo":"gasto","monto":15,"moneda":"USD","descripcion":"Comida","categoria":"Alimentación","fecha":"2026-05-19","persona":null,"confianza":"alta","nota":null}
 
-"presté 10 a JC"
-→ {"tipo":"prestamo","monto":10,"moneda":"USD","descripcion":"Préstamo a JC","categoria":"Otro","persona":"JC","confianza":"alta","nota":null}
+"el lunes retiré 40 dólares"
+→ {"tipo":"retiro","monto":40,"moneda":"USD","descripcion":"Retiro de efectivo","categoria":"Otro","fecha":"2026-05-18","persona":null,"confianza":"alta","nota":null}
+
+"hace 3 días presté 10 a JC"
+→ {"tipo":"prestamo","monto":10,"moneda":"USD","descripcion":"Préstamo a JC","categoria":"Otro","fecha":"2026-05-17","persona":"JC","confianza":"alta","nota":null}
 
 "transferí 5 a alguien"
-→ {"tipo":"transferencia","monto":5,"moneda":"USD","descripcion":"Transferencia","categoria":"Otro","persona":"alguien","confianza":"media","nota":"No se especificó destinatario exacto"}
+→ {"tipo":"transferencia","monto":5,"moneda":"USD","descripcion":"Transferencia","categoria":"Otro","fecha":null,"persona":"alguien","confianza":"media","nota":"No se especificó destinatario exacto"}
 
 "gaste 20 en el supermercado"
-→ {"tipo":"gasto","monto":20,"moneda":"USD","descripcion":"Supermercado","categoria":"Alimentación","persona":null,"confianza":"alta","nota":null}
+→ {"tipo":"gasto","monto":20,"moneda":"USD","descripcion":"Supermercado","categoria":"Alimentación","fecha":null,"persona":null,"confianza":"alta","nota":null}
 
 Si el mensaje no contiene ninguna transacción financiera, devuelve:
 {"error": "no_transaction", "mensaje": "Explica brevemente qué necesitas"}
@@ -110,14 +119,15 @@ Si el mensaje no contiene ninguna transacción financiera, devuelve:
 
 
 def parsear_con_ia(texto: str) -> dict:
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    system = SYSTEM_PROMPT.replace("{hoy}", hoy)
     respuesta = claude.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=400,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=[{"role": "user", "content": texto}],
     )
     raw = respuesta.content[0].text.strip()
-    # Limpiar backticks que algunos modelos agregan
     raw = raw.replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
@@ -139,13 +149,23 @@ def asegurar_cabeceras(hoja):
         log.info("Cabeceras creadas en Google Sheets")
 
 
+def _resolver_fecha(fecha_iso: str | None) -> str:
+    """Convierte fecha YYYY-MM-DD → dd/mm/YYYY. Si es None, usa hoy."""
+    if fecha_iso:
+        try:
+            return datetime.strptime(fecha_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    return datetime.now().strftime("%d/%m/%Y")
+
+
 def registrar_en_sheets(transaccion: dict, mensaje_original: str):
     """Agrega una fila nueva con la transacción."""
     hoja  = get_sheet()
     asegurar_cabeceras(hoja)
     ahora = datetime.now()
     fila  = [
-        ahora.strftime("%d/%m/%Y"),
+        _resolver_fecha(transaccion.get("fecha")),
         ahora.strftime("%H:%M"),
         transaccion.get("tipo", ""),
         transaccion.get("monto", 0),
@@ -183,14 +203,16 @@ def formatear_confirmacion(t: dict) -> str:
     persona = f" → *{t['persona']}*" if t.get("persona") else ""
     alerta  = ALERTAS_CONFIANZA.get(t.get("confianza", "alta"), "")
     nota    = f"\n💬 _{t['nota']}_" if t.get("nota") else ""
+    fecha   = _resolver_fecha(t.get("fecha"))
 
     texto = (
         f"{icono} *{t['tipo'].capitalize()} registrado*\n"
         f"━━━━━━━━━━━━━━\n"
         f"💲 Monto:     `{t['monto']} {t['moneda']}`\n"
+        f"📅 Fecha:     {fecha}\n"
         f"📂 Categoría: `{t['categoria']}`\n"
         f"📝 Detalle:   {t['descripcion']}{persona}\n"
-        f"🕐 Hora:      {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+        f"🕐 Hora reg.: {datetime.now().strftime('%H:%M')}\n"
     )
     if alerta:
         texto += f"\n{alerta}"
