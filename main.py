@@ -347,7 +347,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Revisa la conexión con tu hoja.",
             parse_mode="Markdown",
         )
-   except Exception as e:
+    except Exception as e:
         log.error(f"Error inesperado: {e}")
         await update.message.reply_text(
             "⚠️ Ocurrió un error inesperado. Intenta de nuevo en un momento."
