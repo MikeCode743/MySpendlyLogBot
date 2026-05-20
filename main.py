@@ -5,7 +5,7 @@ usando lenguaje natural con Claude AI → Google Sheets
 """
 
 import os
-import json, tempfile
+import json, tempfile, uuid, time
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
@@ -14,11 +14,12 @@ import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -39,6 +40,41 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# Rate limiting por usuario
+# ─────────────────────────────────────────────
+
+RATE_COOLDOWN_SEG  = 4    # segundos mínimos entre peticiones
+RATE_MAX_POR_MIN   = 8    # máximo de peticiones por ventana de 60 s
+
+_rate: dict[int, dict] = {}  # {user_id: {last, count, window_start}}
+
+
+def _verificar_rate(user_id: int) -> tuple[bool, str]:
+    """Retorna (permitido, mensaje_de_error). Thread-safe para asyncio (single-thread)."""
+    ahora = time.monotonic()
+    datos = _rate.setdefault(user_id, {"last": 0.0, "count": 0, "window_start": ahora})
+
+    # Resetear ventana si pasaron 60 s
+    if ahora - datos["window_start"] >= 60:
+        datos["count"]        = 0
+        datos["window_start"] = ahora
+
+    # Cooldown entre peticiones
+    espera = RATE_COOLDOWN_SEG - (ahora - datos["last"])
+    if espera > 0:
+        return False, f"⏳ Espera {espera:.0f}s antes de enviar otra transacción."
+
+    # Límite por minuto
+    if datos["count"] >= RATE_MAX_POR_MIN:
+        restante = 60 - (ahora - datos["window_start"])
+        return False, f"🚫 Límite alcanzado. Intenta en {restante:.0f}s."
+
+    datos["last"]   = ahora
+    datos["count"] += 1
+    return True, ""
+
 
 # ─────────────────────────────────────────────
 # Clientes IA y Google Sheets
@@ -258,9 +294,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *Comandos disponibles*\n\n"
-        "/start   — Bienvenida\n"
-        "/ayuda   — Este menú\n"
-        "/ultimo  — Ver última transacción\n"
+        "/start    — Bienvenida\n"
+        "/ayuda    — Este menú\n"
+        "/ultimo   — Ver última transacción\n"
+        "/resumen  — Resumen del mes actual\n"
         "/cancelar — Cancelar acción en curso\n\n"
         "*Ejemplos de mensajes:*\n"
         "• `Gaste 25 en el supermercado`\n"
@@ -304,10 +341,7 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if texto == "❓ Ayuda":
             await cmd_ayuda(update, context)
         else:
-            await update.message.reply_text(
-                "📊 Abre tu Google Sheets para ver el resumen completo.\n"
-                "Próximamente agregaré un resumen directo aquí. 👷"
-            )
+            await cmd_resumen(update, context)
         return
 
     # Prefijos de teclado rápido: agregar contexto al mensaje
@@ -324,6 +358,12 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
             return
+
+    # Rate limit
+    permitido, msg_limite = _verificar_rate(update.effective_user.id)
+    if not permitido:
+        await update.message.reply_text(msg_limite)
+        return
 
     # Indicador de escritura mientras procesa
     await context.bot.send_chat_action(
@@ -344,18 +384,38 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Guardar en Sheets
-        registrar_en_sheets(resultado, texto)
+        # Si hay una confirmación pendiente anterior, invalidarla
+        pendiente_prev = context.user_data.get("pendiente")
+        if pendiente_prev and pendiente_prev.get("msg_id"):
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=update.effective_chat.id,
+                    message_id=pendiente_prev["msg_id"],
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
 
-        # Guardar en contexto de sesión
-        context.user_data["ultima_transaccion"] = resultado
+        # Guardar transacción pendiente con ID único
+        conf_id = str(uuid.uuid4())[:8]
+        context.user_data["pendiente"] = {
+            "id":               conf_id,
+            "transaccion":      resultado,
+            "mensaje_original": texto,
+            "msg_id":           None,
+        }
 
-        # Confirmar al usuario
-        await update.message.reply_text(
-            formatear_confirmacion(resultado),
+        teclado_conf = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirmar", callback_data=f"confirmar:{conf_id}"),
+            InlineKeyboardButton("❌ Cancelar",  callback_data=f"cancelar:{conf_id}"),
+        ]])
+
+        msg = await update.message.reply_text(
+            f"¿Confirmar este registro?\n\n{formatear_confirmacion(resultado)}",
             parse_mode="Markdown",
-            reply_markup=teclado_rapido(),
+            reply_markup=teclado_conf,
         )
+        context.user_data["pendiente"]["msg_id"] = msg.message_id
 
     except json.JSONDecodeError:
         log.error("Claude no devolvió JSON válido")
@@ -377,6 +437,150 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
+# Callback de confirmación
+# ─────────────────────────────────────────────
+
+async def callback_confirmacion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    partes  = query.data.split(":", 1)
+    accion  = partes[0]
+    conf_id = partes[1] if len(partes) > 1 else None
+
+    pendiente = context.user_data.get("pendiente")
+
+    # Confirmar que el ID coincide (evita actuar sobre confirmaciones viejas)
+    if not pendiente or pendiente.get("id") != conf_id:
+        await query.edit_message_text("⚠️ Esta confirmación ya expiró.")
+        return
+
+    if accion == "confirmar":
+        t   = pendiente["transaccion"]
+        msg = pendiente["mensaje_original"]
+        try:
+            registrar_en_sheets(t, msg)
+        except Exception as e:
+            log.error(f"Error guardando en Sheets: {e}")
+            await query.edit_message_text(
+                "⚠️ Transacción interpretada pero *no se pudo guardar* en Google Sheets.",
+                parse_mode="Markdown",
+            )
+            return
+
+        context.user_data["ultima_transaccion"] = t
+        context.user_data.pop("pendiente", None)
+
+        await query.edit_message_text(
+            f"✅ *Registrado correctamente*\n\n{formatear_confirmacion(t)}",
+            parse_mode="Markdown",
+        )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="¿Qué más registramos?",
+            reply_markup=teclado_rapido(),
+        )
+
+    elif accion == "cancelar":
+        context.user_data.pop("pendiente", None)
+        await query.edit_message_text("❌ Registro cancelado.")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Escribe una nueva transacción cuando quieras.",
+            reply_markup=teclado_rapido(),
+        )
+
+
+# ─────────────────────────────────────────────
+# Resumen mensual
+# ─────────────────────────────────────────────
+
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo",    4: "Abril",
+    5: "Mayo",  6: "Junio",   7: "Julio",    8: "Agosto",
+    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+
+
+async def cmd_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ahora    = datetime.now()
+    mes_num  = ahora.month
+    anio     = ahora.year
+    mes_ref  = f"{mes_num:02d}/{anio}"   # "05/2026"
+
+    try:
+        hoja      = get_sheet()
+        registros = hoja.get_all_values()
+    except Exception as e:
+        log.error(f"Error leyendo Sheets: {e}")
+        await update.message.reply_text("⚠️ No se pudo conectar con Google Sheets.")
+        return
+
+    if len(registros) <= 1:
+        await update.message.reply_text("No hay registros aún. 📭")
+        return
+
+    # Acumuladores
+    totales    = {"ingreso": 0.0, "gasto": 0.0, "retiro": 0.0,
+                  "transferencia": 0.0, "prestamo": 0.0}
+    categorias = {}
+    n_total    = 0
+
+    for fila in registros[1:]:
+        if len(fila) < 4:
+            continue
+        fecha_str = fila[0]           # dd/mm/YYYY
+        partes    = fecha_str.split("/")
+        if len(partes) != 3:
+            continue
+        fila_ref = f"{partes[1]}/{partes[2]}"   # "05/2026"
+        if fila_ref != mes_ref:
+            continue
+
+        tipo = fila[2].lower() if len(fila) > 2 else ""
+        try:
+            monto = float(fila[3]) if len(fila) > 3 else 0.0
+        except ValueError:
+            monto = 0.0
+        cat = fila[6] if len(fila) > 6 else "Otro"
+
+        if tipo in totales:
+            totales[tipo] += monto
+            n_total += 1
+            if tipo == "gasto":
+                categorias[cat] = categorias.get(cat, 0.0) + monto
+
+    balance  = totales["ingreso"] - totales["gasto"] - totales["retiro"]
+    signo    = "+" if balance >= 0 else ""
+    icono_b  = "📈" if balance >= 0 else "📉"
+    nombre_m = f"{MESES_ES[mes_num]} {anio}"
+
+    texto = (
+        f"📊 *Resumen — {nombre_m}*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💵 Ingresos:      `+{totales['ingreso']:.2f} USD`\n"
+        f"💸 Gastos:        `-{totales['gasto']:.2f} USD`\n"
+        f"💰 Retiros:       `-{totales['retiro']:.2f} USD`\n"
+    )
+    if totales["prestamo"]:
+        texto += f"🤝 Préstamos:      `{totales['prestamo']:.2f} USD`\n"
+    if totales["transferencia"]:
+        texto += f"↔️ Transferencias: `{totales['transferencia']:.2f} USD`\n"
+
+    texto += f"━━━━━━━━━━━━━━\n{icono_b} *Balance:*        `{signo}{balance:.2f} USD`\n"
+
+    if categorias:
+        texto += "\n📂 *Gastos por categoría:*\n"
+        for cat, monto in sorted(categorias.items(), key=lambda x: -x[1]):
+            porcentaje = (monto / totales["gasto"] * 100) if totales["gasto"] else 0
+            texto += f"  • {cat}: `{monto:.2f}` _{porcentaje:.0f}%_\n"
+
+    texto += f"\n📝 Transacciones registradas: `{n_total}`"
+
+    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=teclado_rapido())
+
+
+# ─────────────────────────────────────────────
 # Punto de entrada
 # ─────────────────────────────────────────────
 
@@ -393,6 +597,10 @@ def main():
     app.add_handler(CommandHandler("ayuda",    cmd_ayuda))
     app.add_handler(CommandHandler("ultimo",   cmd_ultimo))
     app.add_handler(CommandHandler("cancelar", cmd_cancelar))
+    app.add_handler(CommandHandler("resumen",  cmd_resumen))
+
+    # Callbacks de confirmación
+    app.add_handler(CallbackQueryHandler(callback_confirmacion, pattern=r"^(confirmar|cancelar):"))
 
     # Mensajes de texto (cualquier texto que no sea comando)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_mensaje))
