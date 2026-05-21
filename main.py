@@ -88,17 +88,27 @@ SCOPES = [
 ]
 
 
-def get_sheet():
+_sheet_cache: gspread.Worksheet | None = None
+
+
+def _invalidar_cache_sheets() -> None:
+    global _sheet_cache
+    _sheet_cache = None
+
+
+def get_sheet() -> gspread.Worksheet:
+    global _sheet_cache
+    if _sheet_cache is not None:
+        return _sheet_cache
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_json:
-        # Viene de variable de entorno (Railway)
         creds_dict = json.loads(creds_json)
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     else:
-        # Viene de archivo local (desarrollo)
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
     gc = gspread.authorize(creds)
-    return gc.open(GOOGLE_SHEET_NAME).sheet1
+    _sheet_cache = gc.open(GOOGLE_SHEET_NAME).sheet1
+    return _sheet_cache
 
 
 # ─────────────────────────────────────────────
@@ -120,7 +130,10 @@ Campos del JSON:
 - descripcion : texto corto describiendo la transacción (máx 60 caracteres)
 - categoria   : una de estas exactas:
                   "Vivienda" | "Alimentación" | "Transporte" | "Salud" |
-                  "Entretenimiento" | "Ahorros/Inversiones" | "Otro"
+                  "Entretenimiento" | "Ahorros/Inversiones" |
+                  "Servicios Básicos" | "Otro"
+                  Usa "Servicios Básicos" para: electricidad, agua, gas,
+                  internet, teléfono, mantenimiento del hogar, condominio.
 - fecha       : fecha en formato YYYY-MM-DD. Si el mensaje menciona cuándo ocurrió
                 (ayer, el lunes, hace 3 días, el 15 de mayo, etc.) resuélvela
                 respecto a la fecha de hoy indicada arriba. Si no se menciona fecha,
@@ -149,6 +162,15 @@ Ejemplos de entrada → salida:
 "gaste 20 en el supermercado"
 → {"tipo":"gasto","monto":20,"moneda":"USD","descripcion":"Supermercado","categoria":"Alimentación","fecha":null,"persona":null,"confianza":"alta","nota":null}
 
+"pagué 45 de mantenimiento"
+→ {"tipo":"gasto","monto":45,"moneda":"USD","descripcion":"Mantenimiento/condominio","categoria":"Servicios Básicos","fecha":null,"persona":null,"confianza":"alta","nota":null}
+
+"pagué la luz"
+→ {"tipo":"gasto","monto":0,"moneda":"USD","descripcion":"Servicio eléctrico","categoria":"Servicios Básicos","fecha":null,"persona":null,"confianza":"baja","nota":"No se especificó el monto"}
+
+"pagué internet 30 dólares"
+→ {"tipo":"gasto","monto":30,"moneda":"USD","descripcion":"Internet","categoria":"Servicios Básicos","fecha":null,"persona":null,"confianza":"alta","nota":null}
+
 Si el mensaje no contiene ninguna transacción financiera, devuelve:
 {"error": "no_transaction", "mensaje": "Explica brevemente qué necesitas"}
 """
@@ -160,7 +182,11 @@ def parsear_con_ia(texto: str) -> dict:
     respuesta = claude.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=400,
-        system=system,
+        system=[{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": texto}],
     )
     raw = respuesta.content[0].text.strip()
@@ -196,9 +222,7 @@ def _resolver_fecha(fecha_iso: str | None) -> str:
 
 
 def registrar_en_sheets(transaccion: dict, mensaje_original: str):
-    """Agrega una fila nueva con la transacción."""
-    hoja  = get_sheet()
-    asegurar_cabeceras(hoja)
+    """Agrega una fila nueva. Reintenta una vez si la sesión de Sheets expiró."""
     ahora = datetime.now()
     fila  = [
         _resolver_fecha(transaccion.get("fecha")),
@@ -212,8 +236,19 @@ def registrar_en_sheets(transaccion: dict, mensaje_original: str):
         transaccion.get("confianza", ""),
         mensaje_original,
     ]
-    hoja.append_row(fila)
-    log.info(f"Registrado: {fila}")
+    for intento in range(2):
+        try:
+            hoja = get_sheet()
+            asegurar_cabeceras(hoja)
+            hoja.append_row(fila)
+            log.info(f"Registrado: {fila}")
+            return
+        except gspread.exceptions.APIError:
+            if intento == 0:
+                _invalidar_cache_sheets()
+                log.warning("Sesión Sheets expirada — reconectando...")
+                continue
+            raise
 
 
 # ─────────────────────────────────────────────
@@ -326,10 +361,74 @@ async def cmd_ultimo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("esperando_monto", None)
+    context.user_data.pop("pendiente", None)
     await update.message.reply_text(
         "❌ Acción cancelada. Escribe una nueva transacción cuando quieras.",
         reply_markup=teclado_rapido(),
     )
+
+
+async def _mostrar_confirmacion(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    resultado: dict,
+    texto_original: str,
+) -> None:
+    """Muestra mensaje de confirmación con botones inline. Invalida el anterior si existe."""
+    pendiente_prev = context.user_data.get("pendiente")
+    if pendiente_prev and pendiente_prev.get("msg_id"):
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=update.effective_chat.id,
+                message_id=pendiente_prev["msg_id"],
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+
+    conf_id = str(uuid.uuid4())[:8]
+    context.user_data["pendiente"] = {
+        "id":               conf_id,
+        "transaccion":      resultado,
+        "mensaje_original": texto_original,
+        "msg_id":           None,
+    }
+    teclado_conf = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirmar", callback_data=f"confirmar:{conf_id}"),
+        InlineKeyboardButton("❌ Cancelar",  callback_data=f"cancelar:{conf_id}"),
+    ]])
+    msg = await update.message.reply_text(
+        f"¿Confirmar este registro?\n\n{formatear_confirmacion(resultado)}",
+        parse_mode="Markdown",
+        reply_markup=teclado_conf,
+    )
+    context.user_data["pendiente"]["msg_id"] = msg.message_id
+
+
+async def _resolver_monto_pendiente(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    texto: str,
+) -> None:
+    """Intenta parsear `texto` como monto y completa la transacción pendiente."""
+    datos = context.user_data.get("esperando_monto")
+    try:
+        monto = float(texto.replace(",", ".").strip())
+        if monto <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Valor inválido. Ingresa solo el monto (ej: `25.50`)\n"
+            "o usa /cancelar para descartar.",
+            parse_mode="Markdown",
+        )
+        return
+
+    context.user_data.pop("esperando_monto")
+    t = datos["transaccion"]
+    t["monto"] = monto
+    await _mostrar_confirmacion(update, context, t, datos["mensaje_original"])
 
 
 async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -359,6 +458,11 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # Monto pendiente de mensaje anterior
+    if context.user_data.get("esperando_monto"):
+        await _resolver_monto_pendiente(update, context, texto)
+        return
+
     # Rate limit
     permitido, msg_limite = _verificar_rate(update.effective_user.id)
     if not permitido:
@@ -384,38 +488,21 @@ async def manejar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Si hay una confirmación pendiente anterior, invalidarla
-        pendiente_prev = context.user_data.get("pendiente")
-        if pendiente_prev and pendiente_prev.get("msg_id"):
-            try:
-                await context.bot.edit_message_reply_markup(
-                    chat_id=update.effective_chat.id,
-                    message_id=pendiente_prev["msg_id"],
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
+        # Monto cero → Claude no lo identificó, pedir al usuario
+        if resultado.get("monto", 0) == 0:
+            context.user_data["esperando_monto"] = {
+                "transaccion":      resultado,
+                "mensaje_original": texto,
+            }
+            await update.message.reply_text(
+                f"🔢 No pude identificar el monto.\n"
+                f"📝 _{resultado.get('descripcion', 'Transacción')}_\n\n"
+                f"¿Cuánto fue? (Ej: `25.50`)",
+                parse_mode="Markdown",
+            )
+            return
 
-        # Guardar transacción pendiente con ID único
-        conf_id = str(uuid.uuid4())[:8]
-        context.user_data["pendiente"] = {
-            "id":               conf_id,
-            "transaccion":      resultado,
-            "mensaje_original": texto,
-            "msg_id":           None,
-        }
-
-        teclado_conf = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirmar", callback_data=f"confirmar:{conf_id}"),
-            InlineKeyboardButton("❌ Cancelar",  callback_data=f"cancelar:{conf_id}"),
-        ]])
-
-        msg = await update.message.reply_text(
-            f"¿Confirmar este registro?\n\n{formatear_confirmacion(resultado)}",
-            parse_mode="Markdown",
-            reply_markup=teclado_conf,
-        )
-        context.user_data["pendiente"]["msg_id"] = msg.message_id
+        await _mostrar_confirmacion(update, context, resultado, texto)
 
     except json.JSONDecodeError:
         log.error("Claude no devolvió JSON válido")
