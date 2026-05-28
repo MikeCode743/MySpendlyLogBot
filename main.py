@@ -129,11 +129,22 @@ Campos del JSON:
 - moneda      : "USD" por defecto, o la que indique el usuario
 - descripcion : texto corto describiendo la transacción (máx 60 caracteres)
 - categoria   : una de estas exactas:
-                  "Vivienda" | "Alimentación" | "Transporte" | "Salud" |
+                  "Vivienda" | "Alimentación" | "Transporte" |
+                  "Salud" | "Bienestar/Ejercicio" |
                   "Entretenimiento" | "Ahorros/Inversiones" |
-                  "Servicios Básicos" | "Otro"
+                  "Servicios Básicos" | "Suscripciones Digitales" |
+                  "Mantenimiento Vehículo" | "Regalos y Detalles" |
+                  "Compras Online" | "Hogar y Mejoras" | "Otro"
                   Usa "Servicios Básicos" para: electricidad, agua, gas,
-                  internet, teléfono, mantenimiento del hogar, condominio.
+                  internet, teléfono, condominio.
+                  Usa "Hogar y Mejoras" para: muebles, decoración,
+                  reparaciones del hogar (Vivienda=renta/hipoteca, no mejoras).
+                  Usa "Salud" para: médico, farmacia, consultas médicas.
+                  Usa "Bienestar/Ejercicio" para: gimnasio, suplementos, spa.
+                  Usa "Mantenimiento Vehículo" para: combustible, servicio,
+                  reparaciones de vehículo.
+                  Usa "Suscripciones Digitales" para: Netflix, Spotify,
+                  software, apps de pago.
 - fecha       : fecha en formato YYYY-MM-DD. Si el mensaje menciona cuándo ocurrió
                 (ayer, el lunes, hace 3 días, el 15 de mayo, etc.) resuélvela
                 respecto a la fecha de hoy indicada arriba. Si no se menciona fecha,

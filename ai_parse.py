@@ -12,7 +12,7 @@ def parsear_transaccion(texto_usuario):
         tipo (gasto/ingreso/retiro/transferencia/prestamo),
         monto (número),
         descripcion (texto corto),
-        categoria (Vivienda/Alimentación/Transporte/Salud/Entretenimiento/Ahorros/Otro),
+        categoria (Vivienda/Alimentación/Transporte/Salud/Bienestar-Ejercicio/Entretenimiento/Ahorros-Inversiones/Servicios Básicos/Suscripciones Digitales/Mantenimiento Vehículo/Regalos y Detalles/Compras Online/Hogar y Mejoras/Otro),
         persona (si aplica, o null)
         No devuelvas nada más que el JSON.""",
         messages=[{"role": "user", "content": texto_usuario}]
