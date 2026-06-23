@@ -43,44 +43,51 @@ Cada transacción queda registrada en tu Google Sheets con fecha, hora, tipo, mo
 
 ## Requisitos
 
-- Python 3.10+
 - Token de bot de Telegram ([@BotFather](https://t.me/BotFather))
 - API key de Anthropic (Claude Haiku)
 - Cuenta de servicio de Google con acceso a Sheets
+- `credentials.json` de la cuenta de servicio (descárgalo desde Google Cloud Console)
 
-## Instalación (local)
+Comparte tu Google Sheet con el email de la cuenta de servicio (con permisos de editor).
 
-1. Clona el repositorio:
-   ```bash
-   git clone <repo-url>
-   cd MySpendlyLogBot
-   ```
+---
 
-2. Instala dependencias:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Instalación — Desarrollo (local)
 
-3. Crea el archivo `.env`:
-   ```env
-   TELEGRAM_TOKEN=tu_token_aqui
-   ANTHROPIC_API_KEY=tu_api_key_aqui
-   GOOGLE_SHEET_NAME=Mis Finanzas 2026
-   GOOGLE_CREDENTIALS_FILE=credentials.json
-   ```
+```bash
+git clone <repo-url>
+cd MySpendlyLogBot
 
-4. Coloca el archivo `credentials.json` de tu cuenta de servicio de Google en la raíz del proyecto.
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-5. Comparte tu Google Sheet con el email de la cuenta de servicio (con permisos de editor).
+pip install -r requirements.txt
 
-6. Ejecuta el bot:
-   ```bash
-   python main.py
-   ```
+cp .env.example .env             # edita .env con tus credenciales
+# coloca credentials.json en la raíz del proyecto
 
-## Deploy en Railway (u otro servidor)
+python main.py
+```
 
-En lugar de `GOOGLE_CREDENTIALS_FILE`, usa `GOOGLE_CREDENTIALS_JSON` con el contenido completo del JSON de credenciales:
+`.env` mínimo:
+
+```env
+TELEGRAM_TOKEN=tu_token_aqui
+ANTHROPIC_API_KEY=tu_api_key_aqui
+GOOGLE_SHEET_NAME=Mis Finanzas 2026
+GOOGLE_CREDENTIALS_FILE=credentials.json
+```
+
+---
+
+## Instalación — Producción (VPS / servidor)
+
+En producción usa `GOOGLE_CREDENTIALS_JSON` (contenido del JSON en una sola línea) en lugar del archivo:
+
+```bash
+# Convertir credentials.json a variable de entorno
+python3 -c "import json; f=open('credentials.json'); print(json.dumps(json.load(f)))"
+```
 
 ```env
 TELEGRAM_TOKEN=tu_token_aqui
@@ -89,7 +96,59 @@ GOOGLE_SHEET_NAME=Mis Finanzas 2026
 GOOGLE_CREDENTIALS_JSON={"type":"service_account","project_id":"..."}
 ```
 
-El bot detecta automáticamente cuál usar: primero `GOOGLE_CREDENTIALS_JSON`, luego `GOOGLE_CREDENTIALS_FILE`.
+El bot prioriza `GOOGLE_CREDENTIALS_JSON` sobre `GOOGLE_CREDENTIALS_FILE`.
+
+### Systemd (mantener el proceso activo)
+
+```ini
+# /etc/systemd/system/spendlybot.service
+[Unit]
+Description=MySpendlyLogBot
+After=network.target
+
+[Service]
+WorkingDirectory=/ruta/al/proyecto
+EnvironmentFile=/ruta/al/proyecto/.env
+ExecStart=/ruta/al/proyecto/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now spendlybot
+sudo systemctl status spendlybot
+sudo journalctl -u spendlybot -f   # ver logs
+```
+
+### Railway / Render / Fly.io
+
+Sube las variables de entorno desde el dashboard y despliega directamente. No se necesita configuración extra.
+
+---
+
+## Instalación — Docker
+
+Requiere `credentials.json` en la raíz del proyecto.
+
+```bash
+cp .env.example .env   # edita con tus credenciales
+
+docker compose up -d           # levantar en background
+docker compose logs -f bot     # ver logs en tiempo real
+docker compose restart bot     # reiniciar el bot
+docker compose down            # detener y eliminar contenedor
+```
+
+El contenedor usa `restart: always` — se reinicia automáticamente ante crashes y al arrancar el sistema.
+
+Para reconstruir la imagen tras cambios en el código:
+
+```bash
+docker compose up -d --build
+```
 
 ## Estructura de Google Sheets
 
